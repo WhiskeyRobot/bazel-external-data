@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import sys
 import time
 
 import requests
@@ -47,6 +48,9 @@ class HttpBackend(Backend):
         if self._verbose:
             print(text)
 
+    def _warn(self, text):
+        print(text, file=sys.stderr)
+
     def _send_request_once(self, request_type, path, data=None,
                            extra_headers=None):
         headers = (extra_headers or {}) | {'Authorization': self._api_key}
@@ -76,6 +80,7 @@ class HttpBackend(Backend):
         # Sometimes retrying queries within the same session doesn't help, so
         # we also allow one retry of the whole session if all else fails.
         session_retries = 3
+        request_exception = None
         response = None
         while session_retries >= 0:
             # Try `retries` many times, starting with a delay of `delay` and
@@ -85,14 +90,21 @@ class HttpBackend(Backend):
             backoff_multiplier = 1.8
             # Max delay: delay * multiplier ** (retries - 1)
             while retries >= 0:
-                response = self._send_request_once(
-                    request_type, path, data, extra_headers)
-                if response.status_code not in retry_statuses:
+                request_exception = None
+                response = None
+                try:
+                    response = self._send_request_once(
+                        request_type, path, data, extra_headers)
+                except requests.exceptions.RequestException as e:
+                    request_exception = e
+                if (response is not None
+                      and response.status_code not in retry_statuses):
                     return response  # Success or irrecoverable failure.
                 if retries > 0:
+                    failure = ((response.status_code, response.reason)
+                               if response else request_exception)
                     self._verbose_print(
-                        f"Retrying after {response.status_code}; "
-                        f"{retries} tries remain.")
+                        f"Retrying after {failure}; {retries} tries remain.")
                     time.sleep(delay)
                     delay *= backoff_multiplier
                 retries -= 1
@@ -101,7 +113,9 @@ class HttpBackend(Backend):
                     "Too many retries; trying with a new http session.")
                 self._http = requests.Session()
             session_retries -= 1
-        self._verbose_print("Retries exhausted")
+        self._warn("Retries exhausted")
+        if response is None and request_exception is not None:
+            raise request_exception
         return response  # Out of tries; return whatever we've got.
 
     def _handle_any_error(self, response, success_codes={200}):
