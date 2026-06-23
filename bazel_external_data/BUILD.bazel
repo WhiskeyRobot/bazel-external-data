@@ -1,6 +1,7 @@
 # -*- python -*-
 
 load("//:expose_all_files.bzl", "expose_all_files")
+load("@rules_python//python:defs.bzl", "py_library")
 
 # Use relative package path, as `py_library` does not like absolute package
 # paths. This ensures that `//src` is added to `PYTHONPATH`.

@@ -1,4 +1,5 @@
 bazel-*
+MODULE.bazel.lock
 /user.bazelrc
 
 *__pycache__*
