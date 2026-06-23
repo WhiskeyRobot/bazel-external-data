@@ -14,6 +14,8 @@ SETTINGS_DEFAULT = dict(
     # To use `external_data_repository_download`, this must be a concrete source
     # file, and not NOT a filegroup target / genrule output.
     cli_user_config = None,
+    # Label for the external-data CLI executable.
+    cli_tool = "@bazel_external_data_pkg//:cli",
     # For each `external_data` target, will add an integrity check for the file.
     enable_check_test = True,
 )
@@ -26,7 +28,6 @@ _TEST_SUFFIX = "__check_test"
 # @note This does NOT include 'external_data', so that running with
 # --test_tag_filters=external_data does not require a remote.
 _TEST_TAGS = ["external_data_check_test"]
-_TOOL = "@bazel_external_data_pkg//:cli"
 _MANIFEST_SUFFIX = ".manifest.bzl"
 
 def _get_cli_base_args(settings):
@@ -106,7 +107,8 @@ def external_data(
         hash_file = file + _HASH_SUFFIX
 
         # Binary:
-        args = ["$(location {})".format(_TOOL)]
+        cli_tool = settings["cli_tool"]
+        args = ["$(location {})".format(cli_tool)]
 
         # General commands.
         args += _get_cli_base_args(settings)
@@ -148,7 +150,7 @@ def external_data(
             srcs = data,
             outs = [file],
             cmd = cmd,
-            tools = [_TOOL],
+            tools = [cli_tool],
             tags = tags + [_RULE_TAG],
             # Changes `execroot`, and symlinks the files that we need to crawl
             # the directory structure and get hierarchical packages.
@@ -242,11 +244,12 @@ def external_data_check_test(
     # Use `exec.sh` to forward the existing CLI as a test.
     # TODO(eric.cousineau): Consider removing "external" as a test tag if it's
     # too cumbersome for general testing.
+    cli_tool = settings["cli_tool"]
     native.sh_test(
         name = name,
-        data = [_TOOL] + _get_cli_data(settings) + hash_files,
+        data = [cli_tool] + _get_cli_data(settings) + hash_files,
         srcs = ["@bazel_external_data_pkg//:exec.sh"],
-        args = ["$(location {})".format(_TOOL)] + args,
+        args = ["$(location {})".format(cli_tool)] + args,
         tags = tags + _TEST_TAGS + ["external"],
         # Changes `execroot`, and symlinks the files that we need to crawl the
         # directory structure and get hierarchical packages.
