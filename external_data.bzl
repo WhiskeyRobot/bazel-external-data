@@ -392,6 +392,9 @@ def extract_archive(
               "  After `strip_prefix` filtering, there were no outputs, but " +
               "there were {} original files. Did you use the wrong prefix?")
             .format(len(manifest["files"])))
+    rule_tags = []
+    if tags != None:
+        rule_tags = list(tags)
     _extract_archive_rule(
         name = name + ".extract_archive_rule",
         archive = archive,
@@ -399,7 +402,7 @@ def extract_archive(
         strip_prefix = strip_prefix,
         output_dir = output_dir,
         outs = outs,
-        tags = [
+        tags = rule_tags + [
             # Only run the extract_archive_rule when its files are needed;
             # do not run it as part of `bazel build //...`.
             "manual",
