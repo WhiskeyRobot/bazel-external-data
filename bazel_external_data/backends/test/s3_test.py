@@ -238,7 +238,6 @@ class S3Test(unittest.TestCase):
             dut.check_file(hashsum, "external_data/archives/payload.tar.gz")
 
     def test_missing_aws_cli_error_is_clear(self):
-        self._run_patch.stop()
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             dut = self._make_dut()
             filepath = self._make_file()
@@ -247,7 +246,6 @@ class S3Test(unittest.TestCase):
                 dut.check_file(
                     hashsum,
                     "external_data/archives/payload.tar.gz")
-        self._run_patch.start()
 
     def test_credential_errors_are_clear(self):
         def missing_credentials(cmd, stdout, stderr, text, env):
