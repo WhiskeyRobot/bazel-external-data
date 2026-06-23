@@ -27,6 +27,7 @@ class ProfileNotFound(BotoCoreError):
 
 class FakeS3Client(object):
     objects = {}
+    fail_download = False
     deny_head = False
 
     def head_object(self, Bucket, Key):
@@ -44,6 +45,8 @@ class FakeS3Client(object):
         }
 
     def download_file(self, Bucket, Key, Filename):
+        if self.fail_download:
+            raise BotoCoreError("network unavailable")
         with open(Filename, "wb") as f:
             f.write(self.objects[(Bucket, Key)]["body"])
 
@@ -81,6 +84,7 @@ class S3Test(unittest.TestCase):
         self._old_modules = {
             name: sys.modules.get(name) for name in self._module_names}
         FakeS3Client.objects = {}
+        FakeS3Client.fail_download = False
         FakeS3Client.deny_head = False
         FakeSession.sessions = []
         FakeSession.client_calls = []
@@ -212,6 +216,17 @@ class S3Test(unittest.TestCase):
         with self.assertRaisesRegex(
                 RuntimeError, "AWS credentials are not available"):
             self._make_dut(prefix="scratch/test")
+
+    def test_generic_botocore_errors_are_not_credential_errors(self):
+        dut = self._make_dut()
+        filepath = self._make_file()
+        hashsum = hashes.sha512.compute(filepath)
+        project_relpath = "external_data/archives/payload.tar.gz"
+        dut.upload_file(hashsum, project_relpath, filepath)
+        FakeS3Client.fail_download = True
+
+        with self.assertRaisesRegex(RuntimeError, "S3 GET failed"):
+            dut.download_file(hashsum, project_relpath, filepath)
 
 
 if __name__ == "__main__":

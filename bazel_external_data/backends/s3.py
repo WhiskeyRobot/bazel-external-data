@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import subprocess
@@ -7,27 +6,7 @@ from bazel_external_data import util
 from bazel_external_data.core import Backend
 
 
-_MISSING_RESULT_UNSET = object()
-
-
-@dataclass(frozen=True)
-class S3ObjectMetadata:
-    original_path: str
-    original_name: str
-    original_time: str
-    uploaded_by: str
-    git_remote_best_effort: str
-    git_commit_best_effort: str
-
-    def as_s3_metadata(self):
-        return {
-            "original-path": self.original_path,
-            "original-name": self.original_name,
-            "original-time": self.original_time,
-            "uploaded-by": self.uploaded_by,
-            "git-remote-best-effort": self.git_remote_best_effort,
-            "git-commit-best-effort": self.git_commit_best_effort,
-        }
+_MISSING_ERROR_CODES = ["404", "NoSuchKey", "NotFound"]
 
 
 class S3Backend(Backend):
@@ -119,23 +98,28 @@ class S3Backend(Backend):
                 operation, self._s3_uri(key))
         ) from e
 
-    def _handle_boto_error(
-            self, e, operation, key,
-            missing_result=_MISSING_RESULT_UNSET):
+    def _client_error_code(self, e):
+        return e.response.get("Error", {}).get("Code")
+
+    def _is_missing_error(self, e):
         exceptions = self._botocore_exceptions
         if isinstance(e, exceptions.ClientError):
-            code = e.response.get("Error", {}).get("Code")
-            if code in ["404", "NoSuchKey", "NotFound"]:
-                if missing_result is not _MISSING_RESULT_UNSET:
-                    return missing_result
-                self._handle_client_error(e, operation, key)
+            return self._client_error_code(e) in _MISSING_ERROR_CODES
+        return False
+
+    def _handle_boto_error(self, e, operation, key):
+        exceptions = self._botocore_exceptions
+        if isinstance(e, exceptions.ClientError):
             self._handle_client_error(e, operation, key)
         if isinstance(e, (
-                exceptions.BotoCoreError,
                 exceptions.NoCredentialsError,
                 exceptions.ProfileNotFound)):
             self._handle_credential_error(e, operation, key)
-        return None
+        if isinstance(e, exceptions.BotoCoreError):
+            raise RuntimeError(
+                "S3 {} failed for {}: {}".format(
+                    operation, self._s3_uri(key), e)
+            ) from e
 
     def _best_effort_git_value(self, args):
         try:
@@ -147,19 +131,19 @@ class S3Backend(Backend):
             return "unknown"
 
     def _upload_metadata(self, project_relpath, filepath):
-        return S3ObjectMetadata(
-            original_path=project_relpath,
-            original_name=os.path.basename(filepath),
-            original_time=(
+        return {
+            "original-path": project_relpath,
+            "original-name": os.path.basename(filepath),
+            "original-time": (
                 datetime.now(timezone.utc).isoformat()
                     .replace("+00:00", "Z")),
-            uploaded_by=self._best_effort_git_value(
+            "uploaded-by": self._best_effort_git_value(
                 ["config", "user.email"]),
-            git_remote_best_effort=self._best_effort_git_value(
+            "git-remote-best-effort": self._best_effort_git_value(
                 ["config", "--get", "remote.origin.url"]),
-            git_commit_best_effort=self._best_effort_git_value(
+            "git-commit-best-effort": self._best_effort_git_value(
                 ["rev-parse", "HEAD"]),
-        ).as_s3_metadata()
+        }
 
     def check_file(self, hash, project_relpath):
         key = self._object_key(hash)
@@ -168,10 +152,9 @@ class S3Backend(Backend):
             self._client.head_object(Bucket=self._bucket, Key=key)
             return True
         except Exception as e:
-            result = self._handle_boto_error(
-                e, "HEAD", key, missing_result=False)
-            if result is not None:
-                return result
+            if self._is_missing_error(e):
+                return False
+            self._handle_boto_error(e, "HEAD", key)
             raise
 
     def download_file(self, hash, project_relpath, output_file):
