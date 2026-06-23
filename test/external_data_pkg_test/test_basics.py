@@ -32,6 +32,23 @@ data_dir = 'data'
 mock_dir = 'mock'
 
 
+def find_runfile(candidates):
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    search_roots = ["."]
+    runfiles_dir = os.environ.get("RUNFILES_DIR")
+    if runfiles_dir:
+        search_roots.append(runfiles_dir)
+    for search_root in search_roots:
+        for root, _, filenames in os.walk(search_root):
+            for filename in filenames:
+                path = os.path.normpath(os.path.join(root, filename))
+                if any(path.endswith(candidate) for candidate in candidates):
+                    return path
+    raise FileNotFoundError(candidates)
+
+
 class TestBasics(unittest.TestCase):
     def test_files(self):
         # Go through each file and ensure that we have the desired contents.
@@ -64,11 +81,18 @@ class TestBasics(unittest.TestCase):
 
     def test_repository_rules(self):
         files = [
-            "external/repo_archive/test_data/a.bin",
-            "external/repo_archive/test_data/b.bin",
-            "external/repo_archive/test_data/subdir/c.bin",
+            "test_data/a.bin",
+            "test_data/b.bin",
+            "test_data/subdir/c.bin",
+        ]
+        repo_prefixes = [
+            "external/repo_archive",
+            "repo_archive",
         ]
         for file in files:
+            candidates = [
+                os.path.join(prefix, file) for prefix in repo_prefixes]
+            file = find_runfile(candidates)
             with open(file) as f:
                 c = f.read()
                 expected = "Content for '{}'\n".format(basename(file))

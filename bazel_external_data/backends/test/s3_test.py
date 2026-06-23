@@ -27,8 +27,11 @@ class ProfileNotFound(BotoCoreError):
 
 class FakeS3Client(object):
     objects = {}
+    deny_head = False
 
     def head_object(self, Bucket, Key):
+        if self.deny_head:
+            raise ClientError("AccessDenied")
         if (Bucket, Key) not in self.objects:
             raise ClientError("404")
 
@@ -46,11 +49,16 @@ class FakeS3Client(object):
 
 
 class FakeSession(object):
+    sessions = []
+    client_calls = []
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.sessions.append(self)
 
     def client(self, name, **kwargs):
         assert name == "s3"
+        self.client_calls.append((name, kwargs))
         return FakeS3Client()
 
 
@@ -61,22 +69,34 @@ class Config(object):
 
 class S3Test(unittest.TestCase):
     def setUp(self):
-        self._old_modules = dict(sys.modules)
+        self._module_names = [
+            "boto3",
+            "botocore",
+            "botocore.config",
+            "botocore.exceptions",
+        ]
+        self._old_modules = {
+            name: sys.modules.get(name) for name in self._module_names}
         FakeS3Client.objects = {}
+        FakeS3Client.deny_head = False
+        FakeSession.sessions = []
+        FakeSession.client_calls = []
         boto3 = types.ModuleType("boto3")
         boto3.session = types.SimpleNamespace(Session=FakeSession)
         botocore = types.ModuleType("botocore")
-        botocore.config = types.SimpleNamespace(Config=Config)
-        botocore.exceptions = types.SimpleNamespace(
-            BotoCoreError=BotoCoreError,
-            ClientError=ClientError,
-            NoCredentialsError=NoCredentialsError,
-            ProfileNotFound=ProfileNotFound,
-        )
+        botocore_config = types.ModuleType("botocore.config")
+        botocore_config.Config = Config
+        botocore_exceptions = types.ModuleType("botocore.exceptions")
+        botocore_exceptions.BotoCoreError = BotoCoreError
+        botocore_exceptions.ClientError = ClientError
+        botocore_exceptions.NoCredentialsError = NoCredentialsError
+        botocore_exceptions.ProfileNotFound = ProfileNotFound
+        botocore.config = botocore_config
+        botocore.exceptions = botocore_exceptions
         sys.modules["boto3"] = boto3
         sys.modules["botocore"] = botocore
-        sys.modules["botocore.config"] = botocore.config
-        sys.modules["botocore.exceptions"] = botocore.exceptions
+        sys.modules["botocore.config"] = botocore_config
+        sys.modules["botocore.exceptions"] = botocore_exceptions
 
         from bazel_external_data.backends.s3 import S3Backend
         self._backend_cls = S3Backend
@@ -84,8 +104,12 @@ class S3Test(unittest.TestCase):
             dir=os.environ.get("TEST_TEMPDIR", None))
 
     def tearDown(self):
-        sys.modules.clear()
-        sys.modules.update(self._old_modules)
+        for name in self._module_names:
+            old_module = self._old_modules[name]
+            if old_module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = old_module
         shutil.rmtree(self._test_dir)
 
     def _make_dut(self, prefix=""):
@@ -120,6 +144,32 @@ class S3Test(unittest.TestCase):
             "scratch/test/{}".format(hashsum.get_value()),
             dut._object_key(hashsum))
 
+    def test_client_configuration(self):
+        config = {
+            "backend": "s3",
+            "bucket": "unit-test-bucket",
+            "endpoint_url": "https://example.invalid",
+            "max_attempts": 3,
+            "profile_name": "unit-test-profile",
+            "region_name": "us-west-2",
+            "retry_mode": "adaptive",
+        }
+        self._backend_cls(
+            config,
+            self._test_dir,
+            core.User({"core": {"cache_dir": self._test_dir}}))
+
+        self.assertEqual(
+            {"profile_name": "unit-test-profile", "region_name": "us-west-2"},
+            FakeSession.sessions[-1].kwargs)
+        name, client_kwargs = FakeSession.client_calls[-1]
+        self.assertEqual("s3", name)
+        self.assertEqual(
+            "https://example.invalid", client_kwargs["endpoint_url"])
+        self.assertEqual(
+            {"max_attempts": 3, "mode": "adaptive"},
+            client_kwargs["config"].kwargs["retries"])
+
     def test_file_lifecycle_and_upload_metadata(self):
         dut = self._make_dut(prefix="scratch/test")
         filepath = self._make_file()
@@ -142,6 +192,15 @@ class S3Test(unittest.TestCase):
         dut.download_file(hashsum, project_relpath, filepath)
         with open(filepath, "r") as f:
             self.assertEqual("payload\n", f.read())
+
+    def test_access_denied_is_an_error(self):
+        dut = self._make_dut()
+        filepath = self._make_file()
+        hashsum = hashes.sha512.compute(filepath)
+        FakeS3Client.deny_head = True
+
+        with self.assertRaisesRegex(RuntimeError, "S3 HEAD denied"):
+            dut.check_file(hashsum, "external_data/archives/payload.tar.gz")
 
 
 if __name__ == "__main__":

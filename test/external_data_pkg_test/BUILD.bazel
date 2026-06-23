@@ -29,8 +29,11 @@ toolchain(
 )
 
 exports_files(
-    srcs = [".external_data.yml"],
-    visibility = ["//:__subpackages__"],
+    srcs = [
+        ".external_data.yml",
+        "WORKSPACE",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 py_test(

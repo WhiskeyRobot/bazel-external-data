@@ -1,10 +1,13 @@
-from datetime import datetime, timezone
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import os
 import subprocess
 
 from bazel_external_data import util
 from bazel_external_data.core import Backend
+
+
+_MISSING_RESULT_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ class S3Backend(Backend):
         self._disable_upload = config.get("disable_upload", False)
         self._verbose = config.get("verbose", False)
         self._project_root = project_root
+        self._botocore_exceptions = None
         self._client = self._make_client(config)
 
     def _make_client(self, config):
@@ -54,6 +58,7 @@ class S3Backend(Backend):
                 "The S3 backend requires boto3 and botocore. Install boto3 "
                 "or use a non-S3 backend."
             ) from e
+        self._botocore_exceptions = botocore.exceptions
 
         session_kwargs = {}
         if "profile_name" in config:
@@ -105,6 +110,24 @@ class S3Backend(Backend):
                 operation, self._bucket, key)
         ) from e
 
+    def _handle_boto_error(
+            self, e, operation, key,
+            missing_result=_MISSING_RESULT_UNSET):
+        exceptions = self._botocore_exceptions
+        if isinstance(e, exceptions.ClientError):
+            code = e.response.get("Error", {}).get("Code")
+            if code in ["404", "NoSuchKey", "NotFound"]:
+                if missing_result is not _MISSING_RESULT_UNSET:
+                    return missing_result
+                self._handle_client_error(e, operation, key)
+            self._handle_client_error(e, operation, key)
+        if isinstance(e, (
+                exceptions.BotoCoreError,
+                exceptions.NoCredentialsError,
+                exceptions.ProfileNotFound)):
+            self._handle_credential_error(e, operation, key)
+        return None
+
     def _best_effort_git_value(self, args):
         try:
             return subprocess.check_output(
@@ -129,13 +152,6 @@ class S3Backend(Backend):
                 ["rev-parse", "HEAD"]),
         ).as_s3_metadata()
 
-    def _import_botocore_exceptions(self):
-        try:
-            import botocore.exceptions
-        except ImportError:
-            raise
-        return botocore.exceptions
-
     def check_file(self, hash, project_relpath):
         key = self._object_key(hash)
         self._verbose_print("head s3://{}/{}".format(self._bucket, key))
@@ -143,17 +159,10 @@ class S3Backend(Backend):
             self._client.head_object(Bucket=self._bucket, Key=key)
             return True
         except Exception as e:
-            exceptions = self._import_botocore_exceptions()
-            if isinstance(e, exceptions.ClientError):
-                code = e.response.get("Error", {}).get("Code")
-                if code in ["404", "NoSuchKey", "NotFound"]:
-                    return False
-                self._handle_client_error(e, "HEAD", key)
-            if isinstance(e, (
-                    exceptions.BotoCoreError,
-                    exceptions.NoCredentialsError,
-                    exceptions.ProfileNotFound)):
-                self._handle_credential_error(e, "HEAD", key)
+            result = self._handle_boto_error(
+                e, "HEAD", key, missing_result=False)
+            if result is not None:
+                return result
             raise
 
     def download_file(self, hash, project_relpath, output_file):
@@ -166,14 +175,7 @@ class S3Backend(Backend):
         try:
             self._client.download_file(self._bucket, key, output_file)
         except Exception as e:
-            exceptions = self._import_botocore_exceptions()
-            if isinstance(e, exceptions.ClientError):
-                self._handle_client_error(e, "GET", key)
-            if isinstance(e, (
-                    exceptions.BotoCoreError,
-                    exceptions.NoCredentialsError,
-                    exceptions.ProfileNotFound)):
-                self._handle_credential_error(e, "GET", key)
+            self._handle_boto_error(e, "GET", key)
             raise
 
     def upload_file(self, hash, project_relpath, filepath):
@@ -191,13 +193,6 @@ class S3Backend(Backend):
             self._client.upload_file(
                 filepath, self._bucket, key, ExtraArgs=extra_args)
         except Exception as e:
-            exceptions = self._import_botocore_exceptions()
-            if isinstance(e, exceptions.ClientError):
-                self._handle_client_error(e, "PUT", key)
-            if isinstance(e, (
-                    exceptions.BotoCoreError,
-                    exceptions.NoCredentialsError,
-                    exceptions.ProfileNotFound)):
-                self._handle_credential_error(e, "PUT", key)
+            self._handle_boto_error(e, "PUT", key)
             raise
         print("File uploaded successfully!")

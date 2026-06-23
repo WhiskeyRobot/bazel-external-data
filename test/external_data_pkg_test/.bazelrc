@@ -4,6 +4,7 @@ try-import %workspace%/user.bazelrc
 # We do not yet support bzlmod in this repository; we suppress it to avoid
 # generating spurious module and lock files.
 common --enable_bzlmod=false
+common --enable_workspace
 
 # Simple customizations.
 build --test_output=errors --test_summary=terse

@@ -20,12 +20,37 @@ fi
 # confuse Bazel with infinite symlinks).
 workspace_dir="${TEST_TMPDIR}/workspace"
 mkdir -p "${workspace_dir}"
-# Copy all of runfiles, assuming that we have no directory symlinks.
-srcs=$(find . -type f -o -type l)
-for src in ${srcs}; do
-    subdir=$(dirname "${src}")
-    mkdir -p "${workspace_dir}/${subdir}"
-    cp "${src}" "${workspace_dir}/${subdir}"
+copy_tree() {
+    local src_root="${1}"
+    local dst_root="${2}"
+    local src
+    (
+        cd "${src_root}"
+        find . -type f -o -type l
+    ) | while IFS= read -r src; do
+        local subdir
+        subdir=$(dirname "${src}")
+        mkdir -p "${dst_root}/${subdir}"
+        cp "${src_root}/${src}" "${dst_root}/${subdir}"
+    done
+}
+
+# Copy the main workspace into the new workspace root.
+copy_tree "${PWD}" "${workspace_dir}"
+
+# Also copy sibling external repositories from runfiles. In bzlmod these sit
+# next to the main workspace instead of under ./external.
+runfiles_dir=$(dirname "${PWD}")
+main_workspace=$(basename "${PWD}")
+for repo_dir in "${runfiles_dir}"/*; do
+    repo_name=$(basename "${repo_dir}")
+    if [[ "${repo_name}" == "${main_workspace}" ]]; then
+        continue
+    fi
+    if [[ ! -d "${repo_dir}" ]]; then
+        continue
+    fi
+    copy_tree "${repo_dir}" "${workspace_dir}/${repo_name}"
 done
 
 # Execute command.

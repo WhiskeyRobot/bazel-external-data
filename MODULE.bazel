@@ -4,5 +4,16 @@ module(
 )
 
 bazel_dep(name = "rules_python", version = "2.0.0")
+bazel_dep(name = "rules_shell", version = "0.8.0")
+
+local_repository = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:local.bzl",
+    "local_repository",
+)
+
+local_repository(
+    name = "external_data_pkg_test",
+    path = "test/external_data_pkg_test",
+)
 
 register_toolchains("//:py_toolchain")

@@ -1,3 +1,5 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 SETTINGS_DEFAULT = dict(
     # Warn if in development mode (e.g. if files will be lost when pushing).
     enable_warn = True,
@@ -245,7 +247,7 @@ def external_data_check_test(
     # TODO(eric.cousineau): Consider removing "external" as a test tag if it's
     # too cumbersome for general testing.
     cli_tool = settings["cli_tool"]
-    native.sh_test(
+    sh_test(
         name = name,
         data = [cli_tool] + _get_cli_data(settings) + hash_files,
         srcs = ["@bazel_external_data_pkg//:exec.sh"],

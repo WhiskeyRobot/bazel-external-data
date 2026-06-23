@@ -5,7 +5,7 @@ set -eux -o pipefail
 # `workspace_test.sh`).
 [[ -n "${TEST_TMPDIR}" ]]
 
-package_relpath="${1}"
+package_marker="${1}"
 shift
 
 # Create mock drake/WORKSPACE file.
@@ -19,7 +19,7 @@ find . -name '*external_data.*' | \
     xargs sed -i "s#/tmp/bazel_external_data#${TEST_TMPDIR}#g"
 
 # Change to the workspace directory.
-cd "${package_relpath}"
+cd "$(dirname "${package_marker}")"
 # Ensure path to Drake is corrected.
 echo "def get_drake_path(_): return \"${drake_dir}\"" > ./drake_path.bzl
 # Get rid of Bazel symlinks if they already exist.
