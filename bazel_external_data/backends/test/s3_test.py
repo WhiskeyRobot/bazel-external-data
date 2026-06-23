@@ -120,13 +120,14 @@ class S3Test(unittest.TestCase):
                 sys.modules[name] = old_module
         shutil.rmtree(self._test_dir)
 
-    def _make_dut(self, prefix=""):
+    def _make_dut(self, prefix="", **kwargs):
         config = {
             "backend": "s3",
             "bucket": "unit-test-bucket",
         }
         if prefix:
             config["prefix"] = prefix
+        config.update(kwargs)
         return self._backend_cls(
             config,
             self._test_dir,
@@ -200,6 +201,17 @@ class S3Test(unittest.TestCase):
         dut.download_file(hashsum, project_relpath, filepath)
         with open(filepath, "r") as f:
             self.assertEqual("payload\n", f.read())
+
+    def test_upload_can_be_disabled(self):
+        dut = self._make_dut(disable_upload=True)
+        filepath = self._make_file()
+        hashsum = hashes.sha512.compute(filepath)
+
+        with self.assertRaisesRegex(RuntimeError, "Upload disabled"):
+            dut.upload_file(
+                hashsum,
+                "external_data/archives/payload.tar.gz",
+                filepath)
 
     def test_access_denied_is_an_error(self):
         dut = self._make_dut()

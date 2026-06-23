@@ -6,7 +6,7 @@ from bazel_external_data import util
 from bazel_external_data.core import Backend
 
 
-_MISSING_ERROR_CODES = ["404", "NoSuchKey", "NotFound"]
+_MISSING_ERROR_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
 class S3Backend(Backend):
@@ -111,11 +111,11 @@ class S3Backend(Backend):
         exceptions = self._botocore_exceptions
         if isinstance(e, exceptions.ClientError):
             self._handle_client_error(e, operation, key)
-        if isinstance(e, (
+        elif isinstance(e, (
                 exceptions.NoCredentialsError,
                 exceptions.ProfileNotFound)):
             self._handle_credential_error(e, operation, key)
-        if isinstance(e, exceptions.BotoCoreError):
+        elif isinstance(e, exceptions.BotoCoreError):
             raise RuntimeError(
                 "S3 {} failed for {}: {}".format(
                     operation, self._s3_uri(key), e)
