@@ -51,8 +51,11 @@ class FakeS3Client(object):
 class FakeSession(object):
     sessions = []
     client_calls = []
+    raise_on_init = False
 
     def __init__(self, **kwargs):
+        if self.raise_on_init:
+            raise ProfileNotFound()
         self.kwargs = kwargs
         self.sessions.append(self)
 
@@ -81,6 +84,7 @@ class S3Test(unittest.TestCase):
         FakeS3Client.deny_head = False
         FakeSession.sessions = []
         FakeSession.client_calls = []
+        FakeSession.raise_on_init = False
         boto3 = types.ModuleType("boto3")
         boto3.session = types.SimpleNamespace(Session=FakeSession)
         botocore = types.ModuleType("botocore")
@@ -185,7 +189,7 @@ class S3Test(unittest.TestCase):
             ("unit-test-bucket", key)
         ]["extra_args"]["Metadata"]
         self.assertEqual(project_relpath, metadata["original-path"])
-        self.assertEqual("payload.txt", metadata["original-filename"])
+        self.assertEqual("payload.txt", metadata["original-name"])
         self.assertIn("git-commit-best-effort", metadata)
 
         os.remove(filepath)
@@ -201,6 +205,13 @@ class S3Test(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "S3 HEAD denied"):
             dut.check_file(hashsum, "external_data/archives/payload.tar.gz")
+
+    def test_client_setup_errors_are_clear(self):
+        FakeSession.raise_on_init = True
+
+        with self.assertRaisesRegex(
+                RuntimeError, "AWS credentials are not available"):
+            self._make_dut(prefix="scratch/test")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ _MISSING_RESULT_UNSET = object()
 @dataclass(frozen=True)
 class S3ObjectMetadata:
     original_path: str
-    original_filename: str
+    original_name: str
     original_time: str
     uploaded_by: str
     git_remote_best_effort: str
@@ -22,7 +22,7 @@ class S3ObjectMetadata:
     def as_s3_metadata(self):
         return {
             "original-path": self.original_path,
-            "original-filename": self.original_filename,
+            "original-name": self.original_name,
             "original-time": self.original_time,
             "uploaded-by": self.uploaded_by,
             "git-remote-best-effort": self.git_remote_best_effort,
@@ -65,22 +65,31 @@ class S3Backend(Backend):
             session_kwargs["profile_name"] = config["profile_name"]
         if "region_name" in config:
             session_kwargs["region_name"] = config["region_name"]
-        session = boto3.session.Session(**session_kwargs)
+        try:
+            session = boto3.session.Session(**session_kwargs)
 
-        client_kwargs = {}
-        if "endpoint_url" in config:
-            client_kwargs["endpoint_url"] = config["endpoint_url"]
-        client_kwargs["config"] = botocore.config.Config(
-            retries={
-                "max_attempts": config.get("max_attempts", 10),
-                "mode": config.get("retry_mode", "standard"),
-            },
-        )
-        return session.client("s3", **client_kwargs)
+            client_kwargs = {}
+            if "endpoint_url" in config:
+                client_kwargs["endpoint_url"] = config["endpoint_url"]
+            client_kwargs["config"] = botocore.config.Config(
+                retries={
+                    "max_attempts": config.get("max_attempts", 10),
+                    "mode": config.get("retry_mode", "standard"),
+                },
+            )
+            return session.client("s3", **client_kwargs)
+        except Exception as e:
+            self._handle_boto_error(e, "CONFIGURE", self._prefix)
+            raise
 
     def _verbose_print(self, text):
         if self._verbose:
             print(text)
+
+    def _s3_uri(self, key=""):
+        if key:
+            return "s3://{}/{}".format(self._bucket, key)
+        return "s3://{}".format(self._bucket)
 
     def _object_key(self, hash):
         hash_path = ("" if hash.get_algo() == "sha512"
@@ -94,20 +103,20 @@ class S3Backend(Backend):
         code = e.response.get("Error", {}).get("Code")
         if code in ["403", "AccessDenied"]:
             raise RuntimeError(
-                "S3 {} denied for s3://{}/{}. Check AWS credentials and "
-                "bucket permissions.".format(operation, self._bucket, key)
+                "S3 {} denied for {}. Check AWS credentials and bucket "
+                "permissions.".format(operation, self._s3_uri(key))
             ) from e
         raise RuntimeError(
-            "S3 {} failed for s3://{}/{}: {}".format(
-                operation, self._bucket, key, e)
+            "S3 {} failed for {}: {}".format(
+                operation, self._s3_uri(key), e)
         ) from e
 
     def _handle_credential_error(self, e, operation, key):
         raise RuntimeError(
-            "AWS credentials are not available for S3 {} of s3://{}/{}. "
+            "AWS credentials are not available for S3 {} of {}. "
             "Configure standard AWS authentication such as AWS_PROFILE, "
             "environment variables, or an instance role.".format(
-                operation, self._bucket, key)
+                operation, self._s3_uri(key))
         ) from e
 
     def _handle_boto_error(
@@ -140,7 +149,7 @@ class S3Backend(Backend):
     def _upload_metadata(self, project_relpath, filepath):
         return S3ObjectMetadata(
             original_path=project_relpath,
-            original_filename=os.path.basename(filepath),
+            original_name=os.path.basename(filepath),
             original_time=(
                 datetime.now(timezone.utc).isoformat()
                     .replace("+00:00", "Z")),

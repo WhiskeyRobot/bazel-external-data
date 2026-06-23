@@ -12,6 +12,7 @@ local_repository = use_repo_rule(
 )
 
 local_repository(
+    dev_dependency = True,
     name = "external_data_pkg_test",
     path = "test/external_data_pkg_test",
 )
