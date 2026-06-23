@@ -33,8 +33,8 @@ class S3Backend(Backend):
         self._verbose = config.get("verbose", False)
         self._project_root = project_root
 
-        self._profile = config.get("profile", config.get("profile_name"))
-        self._region = config.get("region", config.get("region_name"))
+        self._profile = config.get("profile")
+        self._region = config.get("region")
         self._endpoint_url = config.get("endpoint_url")
         self._max_attempts = config.get("max_attempts")
         self._retry_mode = config.get("retry_mode")

@@ -166,8 +166,8 @@ class S3Test(unittest.TestCase):
             aws_cli="aws-test",
             endpoint_url="https://example.invalid",
             max_attempts=3,
-            profile_name="unit-test-profile",
-            region_name="us-west-2",
+            profile="unit-test-profile",
+            region="us-west-2",
             retry_mode="adaptive",
         )
         filepath = self._make_file()
