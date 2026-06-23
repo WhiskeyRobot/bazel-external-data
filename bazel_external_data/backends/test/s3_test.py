@@ -1,123 +1,131 @@
+import json
 import os
 import shutil
-import sys
+import subprocess
 import tempfile
-import types
 import unittest
+from unittest import mock
 
 from bazel_external_data import core, hashes
+from bazel_external_data.backends.s3 import S3Backend
 
 
-class ClientError(Exception):
-    def __init__(self, code):
-        self.response = {"Error": {"Code": code}}
+def _completed_process(args, returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
-class BotoCoreError(Exception):
-    pass
+class FakeAws(object):
+    def __init__(self):
+        self.calls = []
+        self.objects = {}
+        self.deny_head = False
+        self.fail_download = False
 
+    def run(self, cmd, stdout, stderr, text, env):
+        self.calls.append({
+            "cmd": cmd,
+            "stdout": stdout,
+            "stderr": stderr,
+            "text": text,
+            "env": env,
+        })
+        self.assert_run_kwargs(stdout, stderr, text)
 
-class NoCredentialsError(BotoCoreError):
-    pass
+        s3api_index = cmd.index("s3api")
+        operation = cmd[s3api_index + 1]
+        bucket = self._flag(cmd, "--bucket")
+        key = self._flag(cmd, "--key")
 
+        if operation == "head-object":
+            return self._head_object(cmd, bucket, key)
+        if operation == "put-object":
+            return self._put_object(cmd, bucket, key)
+        if operation == "get-object":
+            return self._get_object(cmd, bucket, key)
+        raise AssertionError("Unsupported operation: {}".format(operation))
 
-class ProfileNotFound(BotoCoreError):
-    pass
+    def assert_run_kwargs(self, stdout, stderr, text):
+        if stdout != subprocess.PIPE:
+            raise AssertionError(stdout)
+        if stderr != subprocess.PIPE:
+            raise AssertionError(stderr)
+        if text is not True:
+            raise AssertionError(text)
 
+    def _flag(self, cmd, name):
+        return cmd[cmd.index(name) + 1]
 
-class FakeS3Client(object):
-    objects = {}
-    fail_download = False
-    deny_head = False
-
-    def head_object(self, Bucket, Key):
+    def _head_object(self, cmd, bucket, key):
         if self.deny_head:
-            raise ClientError("AccessDenied")
-        if (Bucket, Key) not in self.objects:
-            raise ClientError("404")
+            return _completed_process(
+                cmd,
+                returncode=255,
+                stderr=(
+                    "An error occurred (AccessDenied) when calling the "
+                    "HeadObject operation: Access Denied"
+                ),
+            )
+        if (bucket, key) not in self.objects:
+            return _completed_process(
+                cmd,
+                returncode=255,
+                stderr=(
+                    "An error occurred (404) when calling the HeadObject "
+                    "operation: Not Found"
+                ),
+            )
+        return _completed_process(cmd, stdout="{}\n")
 
-    def upload_file(self, Filename, Bucket, Key, ExtraArgs=None):
-        with open(Filename, "rb") as f:
+    def _put_object(self, cmd, bucket, key):
+        filepath = self._flag(cmd, "--body")
+        with open(filepath, "rb") as f:
             body = f.read()
-        self.objects[(Bucket, Key)] = {
+        self.objects[(bucket, key)] = {
             "body": body,
-            "extra_args": ExtraArgs,
+            "metadata": json.loads(self._flag(cmd, "--metadata")),
         }
+        return _completed_process(cmd, stdout='{"ETag": "etag"}\n')
 
-    def download_file(self, Bucket, Key, Filename):
+    def _get_object(self, cmd, bucket, key):
         if self.fail_download:
-            raise BotoCoreError("network unavailable")
-        with open(Filename, "wb") as f:
-            f.write(self.objects[(Bucket, Key)]["body"])
-
-
-class FakeSession(object):
-    sessions = []
-    client_calls = []
-    raise_on_init = False
-
-    def __init__(self, **kwargs):
-        if self.raise_on_init:
-            raise ProfileNotFound()
-        self.kwargs = kwargs
-        self.sessions.append(self)
-
-    def client(self, name, **kwargs):
-        assert name == "s3"
-        self.client_calls.append((name, kwargs))
-        return FakeS3Client()
-
-
-class Config(object):
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+            return _completed_process(
+                cmd,
+                returncode=255,
+                stderr=(
+                    "An error occurred (RequestTimeout) when calling the "
+                    "GetObject operation: network unavailable"
+                ),
+            )
+        output_file = cmd[-1]
+        with open(output_file, "wb") as f:
+            f.write(self.objects[(bucket, key)]["body"])
+        return _completed_process(cmd, stdout='{"ContentLength": 8}\n')
 
 
 class S3Test(unittest.TestCase):
     def setUp(self):
-        self._module_names = [
-            "boto3",
-            "botocore",
-            "botocore.config",
-            "botocore.exceptions",
-        ]
-        self._old_modules = {
-            name: sys.modules.get(name) for name in self._module_names}
-        FakeS3Client.objects = {}
-        FakeS3Client.fail_download = False
-        FakeS3Client.deny_head = False
-        FakeSession.sessions = []
-        FakeSession.client_calls = []
-        FakeSession.raise_on_init = False
-        boto3 = types.ModuleType("boto3")
-        boto3.session = types.SimpleNamespace(Session=FakeSession)
-        botocore = types.ModuleType("botocore")
-        botocore_config = types.ModuleType("botocore.config")
-        botocore_config.Config = Config
-        botocore_exceptions = types.ModuleType("botocore.exceptions")
-        botocore_exceptions.BotoCoreError = BotoCoreError
-        botocore_exceptions.ClientError = ClientError
-        botocore_exceptions.NoCredentialsError = NoCredentialsError
-        botocore_exceptions.ProfileNotFound = ProfileNotFound
-        botocore.config = botocore_config
-        botocore.exceptions = botocore_exceptions
-        sys.modules["boto3"] = boto3
-        sys.modules["botocore"] = botocore
-        sys.modules["botocore.config"] = botocore_config
-        sys.modules["botocore.exceptions"] = botocore_exceptions
-
-        from bazel_external_data.backends.s3 import S3Backend
-        self._backend_cls = S3Backend
         self._test_dir = tempfile.mkdtemp(
             dir=os.environ.get("TEST_TEMPDIR", None))
+        self._fake_aws = FakeAws()
+        self._run_patch = mock.patch(
+            "subprocess.run",
+            side_effect=self._fake_aws.run,
+        )
+        self._check_output_patch = mock.patch(
+            "subprocess.check_output",
+            side_effect=subprocess.CalledProcessError(1, "git"),
+        )
+        self._run_patch.start()
+        self._check_output_patch.start()
 
     def tearDown(self):
-        for name in self._module_names:
-            old_module = self._old_modules[name]
-            if old_module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = old_module
+        self._check_output_patch.stop()
+        self._run_patch.stop()
         shutil.rmtree(self._test_dir)
 
     def _make_dut(self, prefix="", **kwargs):
@@ -128,7 +136,7 @@ class S3Test(unittest.TestCase):
         if prefix:
             config["prefix"] = prefix
         config.update(kwargs)
-        return self._backend_cls(
+        return S3Backend(
             config,
             self._test_dir,
             core.User({"core": {"cache_dir": self._test_dir}}))
@@ -153,31 +161,38 @@ class S3Test(unittest.TestCase):
             "scratch/test/{}".format(hashsum.get_value()),
             dut._object_key(hashsum))
 
-    def test_client_configuration(self):
-        config = {
-            "backend": "s3",
-            "bucket": "unit-test-bucket",
-            "endpoint_url": "https://example.invalid",
-            "max_attempts": 3,
-            "profile_name": "unit-test-profile",
-            "region_name": "us-west-2",
-            "retry_mode": "adaptive",
-        }
-        self._backend_cls(
-            config,
-            self._test_dir,
-            core.User({"core": {"cache_dir": self._test_dir}}))
+    def test_aws_cli_configuration(self):
+        dut = self._make_dut(
+            aws_cli="aws-test",
+            endpoint_url="https://example.invalid",
+            max_attempts=3,
+            profile_name="unit-test-profile",
+            region_name="us-west-2",
+            retry_mode="adaptive",
+        )
+        filepath = self._make_file()
+        hashsum = hashes.sha512.compute(filepath)
 
+        self.assertFalse(
+            dut.check_file(hashsum, "external_data/archives/payload.tar.gz"))
+
+        call = self._fake_aws.calls[-1]
         self.assertEqual(
-            {"profile_name": "unit-test-profile", "region_name": "us-west-2"},
-            FakeSession.sessions[-1].kwargs)
-        name, client_kwargs = FakeSession.client_calls[-1]
-        self.assertEqual("s3", name)
-        self.assertEqual(
-            "https://example.invalid", client_kwargs["endpoint_url"])
-        self.assertEqual(
-            {"max_attempts": 3, "mode": "adaptive"},
-            client_kwargs["config"].kwargs["retries"])
+            [
+                "aws-test",
+                "--profile", "unit-test-profile",
+                "--region", "us-west-2",
+                "--endpoint-url", "https://example.invalid",
+                "s3api",
+                "head-object",
+                "--bucket", "unit-test-bucket",
+                "--key", hashsum.get_value(),
+            ],
+            call["cmd"],
+        )
+        self.assertEqual("", call["env"]["AWS_PAGER"])
+        self.assertEqual("3", call["env"]["AWS_MAX_ATTEMPTS"])
+        self.assertEqual("adaptive", call["env"]["AWS_RETRY_MODE"])
 
     def test_file_lifecycle_and_upload_metadata(self):
         dut = self._make_dut(prefix="scratch/test")
@@ -190,9 +205,9 @@ class S3Test(unittest.TestCase):
         self.assertTrue(dut.check_file(hashsum, project_relpath))
 
         key = dut._object_key(hashsum)
-        metadata = FakeS3Client.objects[
+        metadata = self._fake_aws.objects[
             ("unit-test-bucket", key)
-        ]["extra_args"]["Metadata"]
+        ]["metadata"]
         self.assertEqual(project_relpath, metadata["original-path"])
         self.assertEqual("payload.txt", metadata["original-name"])
         self.assertIn("git-commit-best-effort", metadata)
@@ -217,25 +232,48 @@ class S3Test(unittest.TestCase):
         dut = self._make_dut()
         filepath = self._make_file()
         hashsum = hashes.sha512.compute(filepath)
-        FakeS3Client.deny_head = True
+        self._fake_aws.deny_head = True
 
         with self.assertRaisesRegex(RuntimeError, "S3 HEAD denied"):
             dut.check_file(hashsum, "external_data/archives/payload.tar.gz")
 
-    def test_client_setup_errors_are_clear(self):
-        FakeSession.raise_on_init = True
+    def test_missing_aws_cli_error_is_clear(self):
+        self._run_patch.stop()
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            dut = self._make_dut()
+            filepath = self._make_file()
+            hashsum = hashes.sha512.compute(filepath)
+            with self.assertRaisesRegex(RuntimeError, "requires the AWS CLI"):
+                dut.check_file(
+                    hashsum,
+                    "external_data/archives/payload.tar.gz")
+        self._run_patch.start()
 
-        with self.assertRaisesRegex(
-                RuntimeError, "AWS credentials are not available"):
-            self._make_dut(prefix="scratch/test")
+    def test_credential_errors_are_clear(self):
+        def missing_credentials(cmd, stdout, stderr, text, env):
+            return _completed_process(
+                cmd,
+                returncode=255,
+                stderr="Unable to locate credentials",
+            )
 
-    def test_generic_botocore_errors_are_not_credential_errors(self):
+        with mock.patch("subprocess.run", side_effect=missing_credentials):
+            dut = self._make_dut()
+            filepath = self._make_file()
+            hashsum = hashes.sha512.compute(filepath)
+            with self.assertRaisesRegex(
+                    RuntimeError, "AWS credentials are not available"):
+                dut.check_file(
+                    hashsum,
+                    "external_data/archives/payload.tar.gz")
+
+    def test_generic_aws_errors_are_not_credential_errors(self):
         dut = self._make_dut()
         filepath = self._make_file()
         hashsum = hashes.sha512.compute(filepath)
         project_relpath = "external_data/archives/payload.tar.gz"
         dut.upload_file(hashsum, project_relpath, filepath)
-        FakeS3Client.fail_download = True
+        self._fake_aws.fail_download = True
 
         with self.assertRaisesRegex(RuntimeError, "S3 GET failed"):
             dut.download_file(hashsum, project_relpath, filepath)

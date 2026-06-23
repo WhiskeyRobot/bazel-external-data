@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 import os
 import subprocess
 
@@ -6,11 +7,17 @@ from bazel_external_data import util
 from bazel_external_data.core import Backend
 
 
+_ACCESS_DENIED_ERROR_CODES = {"403", "AccessDenied", "Forbidden"}
+_CREDENTIAL_ERROR_FRAGMENTS = {
+    "could not be found",
+    "Unable to locate credentials",
+    "NoCredentialsError",
+}
 _MISSING_ERROR_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
 class S3Backend(Backend):
-    """An S3-backed content-addressed store.
+    """An S3-backed content-addressed store using the AWS CLI.
 
     Objects are addressed by digest. For SHA512, the default key is exactly the
     digest value, matching the HTTP backend's SHA512 path convention. Other
@@ -19,47 +26,18 @@ class S3Backend(Backend):
 
     def __init__(self, config, project_root, user):
         Backend.__init__(self, config, project_root, user)
+        self._aws_cli = config.get("aws_cli", "aws")
         self._bucket = config["bucket"]
         self._prefix = config.get("prefix", "").strip("/")
         self._disable_upload = config.get("disable_upload", False)
         self._verbose = config.get("verbose", False)
         self._project_root = project_root
-        self._botocore_exceptions = None
-        self._client = self._make_client(config)
 
-    def _make_client(self, config):
-        try:
-            import boto3
-            import botocore.config
-            import botocore.exceptions
-        except ImportError as e:
-            raise RuntimeError(
-                "The S3 backend requires boto3 and botocore. Install boto3 "
-                "or use a non-S3 backend."
-            ) from e
-        self._botocore_exceptions = botocore.exceptions
-
-        session_kwargs = {}
-        if "profile_name" in config:
-            session_kwargs["profile_name"] = config["profile_name"]
-        if "region_name" in config:
-            session_kwargs["region_name"] = config["region_name"]
-        try:
-            session = boto3.session.Session(**session_kwargs)
-
-            client_kwargs = {}
-            if "endpoint_url" in config:
-                client_kwargs["endpoint_url"] = config["endpoint_url"]
-            client_kwargs["config"] = botocore.config.Config(
-                retries={
-                    "max_attempts": config.get("max_attempts", 10),
-                    "mode": config.get("retry_mode", "standard"),
-                },
-            )
-            return session.client("s3", **client_kwargs)
-        except Exception as e:
-            self._handle_boto_error(e, "CONFIGURE", self._prefix)
-            raise
+        self._profile = config.get("profile", config.get("profile_name"))
+        self._region = config.get("region", config.get("region_name"))
+        self._endpoint_url = config.get("endpoint_url")
+        self._max_attempts = config.get("max_attempts")
+        self._retry_mode = config.get("retry_mode")
 
     def _verbose_print(self, text):
         if self._verbose:
@@ -78,48 +56,70 @@ class S3Backend(Backend):
             key = "{}/{}".format(self._prefix, key)
         return key
 
-    def _handle_client_error(self, e, operation, key):
-        code = e.response.get("Error", {}).get("Code")
-        if code in ["403", "AccessDenied"]:
+    def _aws_base_args(self):
+        args = [self._aws_cli]
+        if self._profile:
+            args += ["--profile", self._profile]
+        if self._region:
+            args += ["--region", self._region]
+        if self._endpoint_url:
+            args += ["--endpoint-url", self._endpoint_url]
+        return args
+
+    def _aws_env(self):
+        env = os.environ.copy()
+        env["AWS_PAGER"] = ""
+        if self._max_attempts is not None:
+            env["AWS_MAX_ATTEMPTS"] = str(self._max_attempts)
+        if self._retry_mode is not None:
+            env["AWS_RETRY_MODE"] = str(self._retry_mode)
+        return env
+
+    def _run_aws(self, args):
+        cmd = self._aws_base_args() + args
+        self._verbose_print(" ".join(cmd))
+        try:
+            return subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=self._aws_env(),
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                "The S3 backend requires the AWS CLI. Install aws or use a "
+                "non-S3 backend."
+            ) from e
+
+    def _aws_output(self, result):
+        return "{}\n{}".format(result.stdout, result.stderr).strip()
+
+    def _has_error_code(self, result, codes):
+        output = self._aws_output(result)
+        return any(code in output for code in codes)
+
+    def _is_missing_result(self, result):
+        return self._has_error_code(result, _MISSING_ERROR_CODES)
+
+    def _handle_aws_error(self, result, operation, key):
+        output = self._aws_output(result)
+        if self._has_error_code(result, _ACCESS_DENIED_ERROR_CODES):
             raise RuntimeError(
                 "S3 {} denied for {}. Check AWS credentials and bucket "
                 "permissions.".format(operation, self._s3_uri(key))
-            ) from e
+            )
+        if any(fragment in output for fragment in _CREDENTIAL_ERROR_FRAGMENTS):
+            raise RuntimeError(
+                "AWS credentials are not available for S3 {} of {}. "
+                "Configure standard AWS authentication such as AWS_PROFILE, "
+                "environment variables, or an instance role.".format(
+                    operation, self._s3_uri(key))
+            )
         raise RuntimeError(
             "S3 {} failed for {}: {}".format(
-                operation, self._s3_uri(key), e)
-        ) from e
-
-    def _handle_credential_error(self, e, operation, key):
-        raise RuntimeError(
-            "AWS credentials are not available for S3 {} of {}. "
-            "Configure standard AWS authentication such as AWS_PROFILE, "
-            "environment variables, or an instance role.".format(
-                operation, self._s3_uri(key))
-        ) from e
-
-    def _client_error_code(self, e):
-        return e.response.get("Error", {}).get("Code")
-
-    def _is_missing_error(self, e):
-        exceptions = self._botocore_exceptions
-        if isinstance(e, exceptions.ClientError):
-            return self._client_error_code(e) in _MISSING_ERROR_CODES
-        return False
-
-    def _handle_boto_error(self, e, operation, key):
-        exceptions = self._botocore_exceptions
-        if isinstance(e, exceptions.ClientError):
-            self._handle_client_error(e, operation, key)
-        elif isinstance(e, (
-                exceptions.NoCredentialsError,
-                exceptions.ProfileNotFound)):
-            self._handle_credential_error(e, operation, key)
-        elif isinstance(e, exceptions.BotoCoreError):
-            raise RuntimeError(
-                "S3 {} failed for {}: {}".format(
-                    operation, self._s3_uri(key), e)
-            ) from e
+                operation, self._s3_uri(key), output)
+        )
 
     def _best_effort_git_value(self, args):
         try:
@@ -147,15 +147,18 @@ class S3Backend(Backend):
 
     def check_file(self, hash, project_relpath):
         key = self._object_key(hash)
-        self._verbose_print("head s3://{}/{}".format(self._bucket, key))
-        try:
-            self._client.head_object(Bucket=self._bucket, Key=key)
+        self._verbose_print("head {}".format(self._s3_uri(key)))
+        result = self._run_aws([
+            "s3api",
+            "head-object",
+            "--bucket", self._bucket,
+            "--key", key,
+        ])
+        if result.returncode == 0:
             return True
-        except Exception as e:
-            if self._is_missing_error(e):
-                return False
-            self._handle_boto_error(e, "HEAD", key)
-            raise
+        if self._is_missing_result(result):
+            return False
+        self._handle_aws_error(result, "HEAD", key)
 
     def download_file(self, hash, project_relpath, output_file):
         key = self._object_key(hash)
@@ -163,12 +166,16 @@ class S3Backend(Backend):
             raise util.DownloadError(
                 "File not available '{}' (hash: {})".format(
                     project_relpath, hash.get_value()))
-        self._verbose_print("get s3://{}/{}".format(self._bucket, key))
-        try:
-            self._client.download_file(self._bucket, key, output_file)
-        except Exception as e:
-            self._handle_boto_error(e, "GET", key)
-            raise
+        self._verbose_print("get {}".format(self._s3_uri(key)))
+        result = self._run_aws([
+            "s3api",
+            "get-object",
+            "--bucket", self._bucket,
+            "--key", key,
+            output_file,
+        ])
+        if result.returncode != 0:
+            self._handle_aws_error(result, "GET", key)
 
     def upload_file(self, hash, project_relpath, filepath):
         if self._disable_upload:
@@ -177,14 +184,18 @@ class S3Backend(Backend):
         if self.check_file(hash, project_relpath):
             print("File already uploaded")
             return
-        self._verbose_print("put s3://{}/{}".format(self._bucket, key))
-        extra_args = {
-            "Metadata": self._upload_metadata(project_relpath, filepath),
-        }
-        try:
-            self._client.upload_file(
-                filepath, self._bucket, key, ExtraArgs=extra_args)
-        except Exception as e:
-            self._handle_boto_error(e, "PUT", key)
-            raise
+        self._verbose_print("put {}".format(self._s3_uri(key)))
+        result = self._run_aws([
+            "s3api",
+            "put-object",
+            "--bucket", self._bucket,
+            "--key", key,
+            "--body", filepath,
+            "--metadata", json.dumps(
+                self._upload_metadata(project_relpath, filepath),
+                sort_keys=True,
+            ),
+        ])
+        if result.returncode != 0:
+            self._handle_aws_error(result, "PUT", key)
         print("File uploaded successfully!")
