@@ -1,7 +1,5 @@
 # -*- python -*-
 
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
-
 # Include release options:
 # https://docs.bazel.build/versions/master/user-manual.html#bazel-releng
 ARGS_DEFAULT = [
@@ -30,7 +28,7 @@ def workspace_test(
     @param data
         Data required for the workspace test.
     """
-    sh_test(
+    native.sh_test(
         name = name,
         srcs = ["@bazel_external_data_pkg//test:workspace_test.sh"],
         args = args,

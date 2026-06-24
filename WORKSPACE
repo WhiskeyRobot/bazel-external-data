@@ -11,13 +11,6 @@ http_archive(
     url = "https://github.com/bazel-contrib/rules_python/releases/download/1.4.1/rules_python-1.4.1.tar.gz",
 )
 
-http_archive(
-    name = "rules_shell",
-    sha256 = "20721f63908879c083f94869e618ea8d4ff5edb91ff9a72a2ebee357fdbc352d",
-    strip_prefix = "rules_shell-0.8.0",
-    url = "https://github.com/bazel-contrib/rules_shell/releases/download/v0.8.0/rules_shell-v0.8.0.tar.gz",
-)
-
 register_toolchains("//:py_toolchain")
 
 load("//test:external_data_workspace_test.bzl", "add_external_data_test_repositories")
