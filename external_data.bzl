@@ -16,6 +16,8 @@ SETTINGS_DEFAULT = dict(
     cli_user_config = None,
     # Label for the external-data CLI executable.
     cli_tool = "@bazel_external_data_pkg//:cli",
+    # Label for the shell trampoline used by `external_data_check_test`.
+    cli_test_script = "@bazel_external_data_pkg//:exec.sh",
     # For each `external_data` target, will add an integrity check for the file.
     enable_check_test = True,
 )
@@ -245,10 +247,11 @@ def external_data_check_test(
     # TODO(eric.cousineau): Consider removing "external" as a test tag if it's
     # too cumbersome for general testing.
     cli_tool = settings["cli_tool"]
+    cli_test_script = settings["cli_test_script"]
     native.sh_test(
         name = name,
         data = [cli_tool] + _get_cli_data(settings) + hash_files,
-        srcs = ["@bazel_external_data_pkg//:exec.sh"],
+        srcs = [cli_test_script],
         args = ["$(location {})".format(cli_tool)] + args,
         tags = tags + _TEST_TAGS + ["external"],
         # Changes `execroot`, and symlinks the files that we need to crawl the
