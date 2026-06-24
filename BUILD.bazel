@@ -1,12 +1,7 @@
 # -*- python -*-
 
 load(":expose_all_files.bzl", "expose_all_files")
-load(
-    "@rules_python//python:defs.bzl",
-    "py_binary",
-    "py_runtime",
-    "py_runtime_pair",
-)
+load("@rules_python//python:defs.bzl", "py_runtime", "py_runtime_pair")
 
 package(default_visibility = ["//visibility:public"])
 

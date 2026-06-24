@@ -35,17 +35,16 @@ def external_data_workspace_test(
         workspace = name
     package = "@{}//".format(workspace)
     package_files = package + ":all_files_recursive"
-    package_marker = package + ":WORKSPACE"
+    package_relpath = "external/" + workspace
     script = "external_data_workspace_test.sh"
     workspace_test(
         name = name,
         args = [
             "$(location {})".format(script),
-            "$(rlocationpath {})".format(package_marker),
+            package_relpath,
         ] + args,
         data = [
             package_files,
-            package_marker,
             script,
         ] + _upstream_files + data,
     )
