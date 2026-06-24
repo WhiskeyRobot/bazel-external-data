@@ -38,8 +38,8 @@ copy_tree() {
 # Copy the main workspace into the new workspace root.
 copy_tree "${PWD}" "${workspace_dir}"
 
-# Also copy sibling external repositories from runfiles. In bzlmod these sit
-# next to the main workspace instead of under ./external.
+# Also copy sibling external repositories from runfiles. Newer Bazel runfiles
+# layouts do not always place external repositories under ./external.
 runfiles_dir=$(dirname "${PWD}")
 main_workspace=$(basename "${PWD}")
 for repo_dir in "${runfiles_dir}"/*; do
