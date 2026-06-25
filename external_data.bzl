@@ -14,10 +14,6 @@ SETTINGS_DEFAULT = dict(
     # To use `external_data_repository_download`, this must be a concrete source
     # file, and not NOT a filegroup target / genrule output.
     cli_user_config = None,
-    # Label for the external-data CLI executable.
-    cli_tool = "@bazel_external_data_pkg//:cli",
-    # Label for the shell trampoline used by `external_data_check_test`.
-    cli_test_script = "@bazel_external_data_pkg//:exec.sh",
     # For each `external_data` target, will add an integrity check for the file.
     enable_check_test = True,
 )
@@ -30,6 +26,7 @@ _TEST_SUFFIX = "__check_test"
 # @note This does NOT include 'external_data', so that running with
 # --test_tag_filters=external_data does not require a remote.
 _TEST_TAGS = ["external_data_check_test"]
+_TOOL = "@bazel_external_data_pkg//:cli"
 _MANIFEST_SUFFIX = ".manifest.bzl"
 
 def _get_cli_base_args(settings):
@@ -109,8 +106,7 @@ def external_data(
         hash_file = file + _HASH_SUFFIX
 
         # Binary:
-        cli_tool = settings["cli_tool"]
-        args = ["$(location {})".format(cli_tool)]
+        args = ["$(location {})".format(_TOOL)]
 
         # General commands.
         args += _get_cli_base_args(settings)
@@ -152,7 +148,7 @@ def external_data(
             srcs = data,
             outs = [file],
             cmd = cmd,
-            tools = [cli_tool],
+            tools = [_TOOL],
             tags = tags + [_RULE_TAG],
             # Changes `execroot`, and symlinks the files that we need to crawl
             # the directory structure and get hierarchical packages.
@@ -246,13 +242,11 @@ def external_data_check_test(
     # Use `exec.sh` to forward the existing CLI as a test.
     # TODO(eric.cousineau): Consider removing "external" as a test tag if it's
     # too cumbersome for general testing.
-    cli_tool = settings["cli_tool"]
-    cli_test_script = settings["cli_test_script"]
     native.sh_test(
         name = name,
-        data = [cli_tool] + _get_cli_data(settings) + hash_files,
-        srcs = [cli_test_script],
-        args = ["$(location {})".format(cli_tool)] + args,
+        data = [_TOOL] + _get_cli_data(settings) + hash_files,
+        srcs = ["@bazel_external_data_pkg//:exec.sh"],
+        args = ["$(location {})".format(_TOOL)] + args,
         tags = tags + _TEST_TAGS + ["external"],
         # Changes `execroot`, and symlinks the files that we need to crawl the
         # directory structure and get hierarchical packages.
@@ -395,9 +389,6 @@ def extract_archive(
               "  After `strip_prefix` filtering, there were no outputs, but " +
               "there were {} original files. Did you use the wrong prefix?")
             .format(len(manifest["files"])))
-    rule_tags = []
-    if tags != None:
-        rule_tags = list(tags)
     _extract_archive_rule(
         name = name + ".extract_archive_rule",
         archive = archive,
@@ -405,7 +396,7 @@ def extract_archive(
         strip_prefix = strip_prefix,
         output_dir = output_dir,
         outs = outs,
-        tags = rule_tags + [
+        tags = [
             # Only run the extract_archive_rule when its files are needed;
             # do not run it as part of `bazel build //...`.
             "manual",
