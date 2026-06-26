@@ -52,7 +52,7 @@ class FakeAws(object):
     def assert_run_kwargs(self, stdout, stderr, text):
         if stdout != subprocess.PIPE:
             raise AssertionError(stdout)
-        if stderr != subprocess.PIPE:
+        if stderr != subprocess.STDOUT:
             raise AssertionError(stderr)
         if text is not True:
             raise AssertionError(text)
@@ -65,7 +65,7 @@ class FakeAws(object):
             return _completed_process(
                 cmd,
                 returncode=255,
-                stderr=(
+                stdout=(
                     "An error occurred (AccessDenied) when calling the "
                     "HeadObject operation: Access Denied"
                 ),
@@ -74,7 +74,7 @@ class FakeAws(object):
             return _completed_process(
                 cmd,
                 returncode=255,
-                stderr=(
+                stdout=(
                     "An error occurred (404) when calling the HeadObject "
                     "operation: Not Found"
                 ),
@@ -96,7 +96,7 @@ class FakeAws(object):
             return _completed_process(
                 cmd,
                 returncode=255,
-                stderr=(
+                stdout=(
                     "An error occurred (RequestTimeout) when calling the "
                     "GetObject operation: network unavailable"
                 ),
@@ -161,14 +161,20 @@ class S3Test(unittest.TestCase):
             "scratch/test/{}".format(hashsum.get_value()),
             dut._object_key(hashsum))
 
+    def test_bucket_rejects_embedded_slash(self):
+        with self.assertRaisesRegex(ValueError, "without '/'"):
+            self._make_dut(bucket="bucket/with/prefix")
+
+    def test_bucket_tolerates_surrounding_slashes(self):
+        dut = self._make_dut(bucket="/unit-test-bucket/")
+        self.assertEqual("unit-test-bucket", dut._bucket)
+
     def test_aws_cli_configuration(self):
         dut = self._make_dut(
             aws_cli="aws-test",
             endpoint_url="https://example.invalid",
-            max_attempts=3,
             profile="unit-test-profile",
             region="us-west-2",
-            retry_mode="adaptive",
         )
         filepath = self._make_file()
         hashsum = hashes.sha512.compute(filepath)
@@ -191,8 +197,6 @@ class S3Test(unittest.TestCase):
             call["cmd"],
         )
         self.assertEqual("", call["env"]["AWS_PAGER"])
-        self.assertEqual("3", call["env"]["AWS_MAX_ATTEMPTS"])
-        self.assertEqual("adaptive", call["env"]["AWS_RETRY_MODE"])
 
     def test_file_lifecycle_and_upload_metadata(self):
         dut = self._make_dut(prefix="scratch/test")
@@ -252,7 +256,7 @@ class S3Test(unittest.TestCase):
             return _completed_process(
                 cmd,
                 returncode=255,
-                stderr="Unable to locate credentials",
+                stdout="Unable to locate credentials",
             )
 
         with mock.patch("subprocess.run", side_effect=missing_credentials):

@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import subprocess
+import sys
 
 from bazel_external_data import util
 from bazel_external_data.core import Backend
@@ -22,12 +24,38 @@ class S3Backend(Backend):
     Objects are addressed by digest. For SHA512, the default key is exactly the
     digest value, matching the HTTP backend's SHA512 path convention. Other
     hash algorithms, if added later, use an algorithm subdirectory.
+
+    Configuration keys (from the remote's entry in `.external_data.yml`):
+      bucket (required): S3 bucket name (must not contain "/").
+      prefix: optional key prefix within the bucket.
+      profile: AWS named profile, passed as `--profile`.
+      region: AWS region, passed as `--region`.
+      endpoint_url: custom S3 endpoint (`--endpoint-url`), e.g. for an
+        S3-compatible store.
+      aws_cli: AWS CLI executable name/path (default "aws").
+      disable_upload: if true, `upload_file` raises (default false).
+      verbose: if true, log AWS commands and progress (default false).
+
+    Operations use the `s3api` subcommands rather than the higher-level `s3`
+    commands because the existence/dedup check needs `head-object`'s
+    structured result to tell missing (404) apart from access-denied (403),
+    which `s3 ls` does not surface cleanly. The other operations use `s3api`
+    too, for consistency.
     """
 
     def __init__(self, config, project_root, user):
-        Backend.__init__(self, config, project_root, user)
+        super().__init__(config, project_root, user)
         self._aws_cli = config.get("aws_cli", "aws")
-        self._bucket = config["bucket"]
+
+        # The bucket is a name, not a path; reject an embedded "/" (a common
+        # mistake when a prefix is meant) but tolerate surrounding slashes.
+        bucket = config["bucket"].strip("/")
+        if "/" in bucket:
+            raise ValueError(
+                "S3 backend 'bucket' must be a bucket name without '/': "
+                "{!r}".format(config["bucket"]))
+        self._bucket = bucket
+
         self._prefix = config.get("prefix", "").strip("/")
         self._disable_upload = config.get("disable_upload", False)
         self._verbose = config.get("verbose", False)
@@ -36,17 +64,17 @@ class S3Backend(Backend):
         self._profile = config.get("profile")
         self._region = config.get("region")
         self._endpoint_url = config.get("endpoint_url")
-        self._max_attempts = config.get("max_attempts")
-        self._retry_mode = config.get("retry_mode")
+
+        # TODO: Support AWS authentication configuration via the `user` input
+        # channel (see RobotLocomotion's docs/config/external_data.user.yml)
+        # in addition to the ambient AWS credential chain.
 
     def _verbose_print(self, text):
         if self._verbose:
             print(text)
 
-    def _s3_uri(self, key=""):
-        if key:
-            return "s3://{}/{}".format(self._bucket, key)
-        return "s3://{}".format(self._bucket)
+    def _s3_uri(self, key):
+        return "s3://{}/{}".format(self._bucket, key)
 
     def _object_key(self, hash):
         hash_path = ("" if hash.get_algo() == "sha512"
@@ -68,11 +96,10 @@ class S3Backend(Backend):
 
     def _aws_env(self):
         env = os.environ.copy()
+        # Disable the AWS CLI v2 pager so output is never piped through an
+        # interactive pager (e.g. less), which can hang or garble the captured
+        # output in a non-interactive subprocess.
         env["AWS_PAGER"] = ""
-        if self._max_attempts is not None:
-            env["AWS_MAX_ATTEMPTS"] = str(self._max_attempts)
-        if self._retry_mode is not None:
-            env["AWS_RETRY_MODE"] = str(self._retry_mode)
         return env
 
     def _run_aws(self, args):
@@ -81,8 +108,10 @@ class S3Backend(Backend):
         try:
             return subprocess.run(
                 cmd,
+                # Merge stderr into stdout so a single stream carries all
+                # output for error reporting.
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 env=self._aws_env(),
             )
@@ -92,57 +121,95 @@ class S3Backend(Backend):
                 "non-S3 backend."
             ) from e
 
-    def _aws_output(self, result):
-        return "{}\n{}".format(result.stdout, result.stderr).strip()
-
-    def _has_error_code(self, result, codes):
-        output = self._aws_output(result)
+    def _has_error_code(self, output, codes):
         return any(code in output for code in codes)
 
-    def _is_missing_result(self, result):
-        return self._has_error_code(result, _MISSING_ERROR_CODES)
+    def _is_access_denied_error(self, output):
+        return self._has_error_code(output, _ACCESS_DENIED_ERROR_CODES)
+
+    def _is_credential_error(self, output):
+        return self._has_error_code(output, _CREDENTIAL_ERROR_FRAGMENTS)
+
+    def _is_missing_result(self, output):
+        return self._has_error_code(output, _MISSING_ERROR_CODES)
 
     def _handle_aws_error(self, result, operation, key):
-        output = self._aws_output(result)
-        if self._has_error_code(result, _ACCESS_DENIED_ERROR_CODES):
+        # stderr is merged into stdout (see _run_aws); always include the full
+        # output so that all information is available when debugging.
+        output = result.stdout
+        if self._is_access_denied_error(output):
             raise RuntimeError(
                 "S3 {} denied for {}. Check AWS credentials and bucket "
-                "permissions.".format(operation, self._s3_uri(key))
-            )
-        if any(fragment in output for fragment in _CREDENTIAL_ERROR_FRAGMENTS):
+                "permissions.\n{}".format(
+                    operation, self._s3_uri(key), output))
+        if self._is_credential_error(output):
             raise RuntimeError(
                 "AWS credentials are not available for S3 {} of {}. "
                 "Configure standard AWS authentication such as AWS_PROFILE, "
-                "environment variables, or an instance role.".format(
-                    operation, self._s3_uri(key))
-            )
+                "environment variables, or an instance role.\n{}".format(
+                    operation, self._s3_uri(key), output))
         raise RuntimeError(
             "S3 {} failed for {}: {}".format(
-                operation, self._s3_uri(key), output)
-        )
+                operation, self._s3_uri(key), output))
 
-    def _best_effort_git_value(self, args):
+    def _git_value(self, args):
+        """Returns stripped `git` output, or None on any failure (quiet)."""
         try:
-            return subprocess.check_output(
+            output = subprocess.check_output(
                 ["git", "-C", self._project_root] + args,
                 stderr=subprocess.DEVNULL,
-            ).decode("utf8").strip() or "unknown"
+                text=True,
+            ).strip()
+            return output or None
         except (OSError, subprocess.CalledProcessError):
-            return "unknown"
+            return None
 
-    def _upload_metadata(self, project_relpath, filepath):
+    def _best_effort_git_value(self, args):
+        value = self._git_value(args)
+        if value is None:
+            print(
+                "warning: git {} failed; using 'unknown' for upload "
+                "metadata".format(" ".join(args)),
+                file=sys.stderr)
+            return "unknown"
+        return value
+
+    def _git_remote_url(self):
+        # Prefer the remote that the current branch tracks; fall back to
+        # origin, then to any configured remote, then to "unknown".
+        candidates = []
+        upstream = self._git_value(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        if upstream and "/" in upstream:
+            candidates.append(upstream.split("/", 1)[0])
+        candidates.append("origin")
+        remotes = self._git_value(["remote"])
+        if remotes:
+            candidates.extend(remotes.split())
+
+        seen = set()
+        for remote in candidates:
+            if remote in seen:
+                continue
+            seen.add(remote)
+            url = self._git_value(["remote", "get-url", remote])
+            if url:
+                return url
+        return "unknown"
+
+    def _compute_metadata(self, project_relpath, filepath):
+        now = datetime.now(timezone.utc)
+        timestamp = now.isoformat().replace("+00:00", "Z")
+        uploaded_by = self._best_effort_git_value(["config", "user.email"])
+        git_remote = self._git_remote_url()
+        git_commit = self._best_effort_git_value(["rev-parse", "HEAD"])
         return {
             "original-path": project_relpath,
-            "original-name": os.path.basename(filepath),
-            "original-time": (
-                datetime.now(timezone.utc).isoformat()
-                    .replace("+00:00", "Z")),
-            "uploaded-by": self._best_effort_git_value(
-                ["config", "user.email"]),
-            "git-remote-best-effort": self._best_effort_git_value(
-                ["config", "--get", "remote.origin.url"]),
-            "git-commit-best-effort": self._best_effort_git_value(
-                ["rev-parse", "HEAD"]),
+            "original-name": Path(filepath).name,
+            "original-time": timestamp,
+            "uploaded-by": uploaded_by,
+            "git-remote-best-effort": git_remote,
+            "git-commit-best-effort": git_commit,
         }
 
     def check_file(self, hash, project_relpath):
@@ -156,7 +223,7 @@ class S3Backend(Backend):
         ])
         if result.returncode == 0:
             return True
-        if self._is_missing_result(result):
+        if self._is_missing_result(result.stdout):
             return False
         self._handle_aws_error(result, "HEAD", key)
 
@@ -176,6 +243,7 @@ class S3Backend(Backend):
         ])
         if result.returncode != 0:
             self._handle_aws_error(result, "GET", key)
+        self._verbose_print("File downloaded successfully!")
 
     def upload_file(self, hash, project_relpath, filepath):
         if self._disable_upload:
@@ -192,7 +260,7 @@ class S3Backend(Backend):
             "--key", key,
             "--body", filepath,
             "--metadata", json.dumps(
-                self._upload_metadata(project_relpath, filepath),
+                self._compute_metadata(project_relpath, filepath),
                 sort_keys=True,
             ),
         ])
