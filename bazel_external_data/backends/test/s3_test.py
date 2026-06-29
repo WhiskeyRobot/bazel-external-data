@@ -47,7 +47,7 @@ class FakeAws(object):
             return self._put_object(cmd, bucket, key)
         if operation == "get-object":
             return self._get_object(cmd, bucket, key)
-        raise AssertionError("Unsupported operation: {}".format(operation))
+        raise AssertionError(f"Unsupported operation: {operation}")
 
     def assert_run_kwargs(self, stdout, stderr, text):
         if stdout != subprocess.PIPE:
@@ -158,7 +158,7 @@ class S3Test(unittest.TestCase):
         filepath = self._make_file()
         hashsum = hashes.sha512.compute(filepath)
         self.assertEqual(
-            "scratch/test/{}".format(hashsum.get_value()),
+            f"scratch/test/{hashsum.get_value()}",
             dut._object_key(hashsum))
 
     def test_bucket_rejects_embedded_slash(self):

@@ -53,7 +53,7 @@ class S3Backend(Backend):
         if "/" in bucket:
             raise ValueError(
                 "S3 backend 'bucket' must be a bucket name without '/': "
-                "{!r}".format(config["bucket"]))
+                f"{config['bucket']!r}")
         self._bucket = bucket
 
         self._prefix = config.get("prefix", "").strip("/")
@@ -74,14 +74,14 @@ class S3Backend(Backend):
             print(text)
 
     def _s3_uri(self, key):
-        return "s3://{}/{}".format(self._bucket, key)
+        return f"s3://{self._bucket}/{key}"
 
     def _object_key(self, hash):
         hash_path = ("" if hash.get_algo() == "sha512"
-                     else "{}/".format(hash.get_algo()))
-        key = "{}{}".format(hash_path, hash.get_value())
+                     else f"{hash.get_algo()}/")
+        key = f"{hash_path}{hash.get_value()}"
         if self._prefix:
-            key = "{}/{}".format(self._prefix, key)
+            key = f"{self._prefix}/{key}"
         return key
 
     def _aws_base_args(self):
@@ -139,18 +139,16 @@ class S3Backend(Backend):
         output = result.stdout
         if self._is_access_denied_error(output):
             raise RuntimeError(
-                "S3 {} denied for {}. Check AWS credentials and bucket "
-                "permissions.\n{}".format(
-                    operation, self._s3_uri(key), output))
+                f"S3 {operation} denied for {self._s3_uri(key)}. Check AWS "
+                f"credentials and bucket permissions.\n{output}")
         if self._is_credential_error(output):
             raise RuntimeError(
-                "AWS credentials are not available for S3 {} of {}. "
-                "Configure standard AWS authentication such as AWS_PROFILE, "
-                "environment variables, or an instance role.\n{}".format(
-                    operation, self._s3_uri(key), output))
+                f"AWS credentials are not available for S3 {operation} of "
+                f"{self._s3_uri(key)}. Configure standard AWS authentication "
+                "such as AWS_PROFILE, environment variables, or an instance "
+                f"role.\n{output}")
         raise RuntimeError(
-            "S3 {} failed for {}: {}".format(
-                operation, self._s3_uri(key), output))
+            f"S3 {operation} failed for {self._s3_uri(key)}: {output}")
 
     def _git_value(self, args):
         """Returns stripped `git` output, or None on any failure (quiet)."""
@@ -168,8 +166,8 @@ class S3Backend(Backend):
         value = self._git_value(args)
         if value is None:
             print(
-                "warning: git {} failed; using 'unknown' for upload "
-                "metadata".format(" ".join(args)),
+                f"warning: git {' '.join(args)} failed; using 'unknown' for "
+                "upload metadata",
                 file=sys.stderr)
             return "unknown"
         return value
@@ -214,7 +212,7 @@ class S3Backend(Backend):
 
     def check_file(self, hash, project_relpath):
         key = self._object_key(hash)
-        self._verbose_print("head {}".format(self._s3_uri(key)))
+        self._verbose_print(f"head {self._s3_uri(key)}")
         result = self._run_aws([
             "s3api",
             "head-object",
@@ -231,9 +229,9 @@ class S3Backend(Backend):
         key = self._object_key(hash)
         if not self.check_file(hash, project_relpath):
             raise util.DownloadError(
-                "File not available '{}' (hash: {})".format(
-                    project_relpath, hash.get_value()))
-        self._verbose_print("get {}".format(self._s3_uri(key)))
+                f"File not available '{project_relpath}' "
+                f"(hash: {hash.get_value()})")
+        self._verbose_print(f"get {self._s3_uri(key)}")
         result = self._run_aws([
             "s3api",
             "get-object",
@@ -252,7 +250,7 @@ class S3Backend(Backend):
         if self.check_file(hash, project_relpath):
             print("File already uploaded")
             return
-        self._verbose_print("put {}".format(self._s3_uri(key)))
+        self._verbose_print(f"put {self._s3_uri(key)}")
         result = self._run_aws([
             "s3api",
             "put-object",
