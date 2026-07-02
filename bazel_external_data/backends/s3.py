@@ -15,6 +15,16 @@ _CREDENTIAL_ERROR_FRAGMENTS = {
     "Unable to locate credentials",
     "NoCredentialsError",
 }
+# An expired (or missing) SSO token is a distinct, common failure with a
+# specific fix -- re-running `aws sso login` -- so detect it separately and
+# point the user at that command rather than the generic credential guidance.
+_SSO_EXPIRED_ERROR_FRAGMENTS = {
+    "Token has expired and refresh failed",
+    "Error loading SSO Token",
+    "session associated with this profile has expired",
+    "UnauthorizedSSOTokenError",
+    "retrieving token from sso",
+}
 _MISSING_ERROR_CODES = {"404", "NoSuchKey", "NotFound"}
 
 
@@ -130,6 +140,9 @@ class S3Backend(Backend):
     def _is_credential_error(self, output):
         return self._has_error_code(output, _CREDENTIAL_ERROR_FRAGMENTS)
 
+    def _is_sso_expired_error(self, output):
+        return self._has_error_code(output, _SSO_EXPIRED_ERROR_FRAGMENTS)
+
     def _is_missing_result(self, output):
         return self._has_error_code(output, _MISSING_ERROR_CODES)
 
@@ -141,6 +154,17 @@ class S3Backend(Backend):
             raise RuntimeError(
                 f"S3 {operation} denied for {self._s3_uri(key)}. Check AWS "
                 f"credentials and bucket permissions.\n{output}")
+        if self._is_sso_expired_error(output):
+            profile = self._profile or os.environ.get("AWS_PROFILE")
+            login_cmd = f"{self._aws_cli} sso login"
+            if profile:
+                login_cmd += f" --profile={profile}"
+            raise RuntimeError(
+                f"AWS SSO credentials for S3 {operation} of "
+                f"{self._s3_uri(key)} have expired. Refresh them and re-run:\n"
+                f"    {login_cmd}\n"
+                "(over SSH without a browser, add --use-device-code)\n"
+                f"{output}")
         if self._is_credential_error(output):
             raise RuntimeError(
                 f"AWS credentials are not available for S3 {operation} of "
