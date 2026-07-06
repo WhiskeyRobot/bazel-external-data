@@ -89,9 +89,23 @@ class FakeAws(object):
 
     def _cp(self, cmd):
         # `s3 cp` takes positional <source> <dest>; exactly one is an s3:// URI.
-        cp_index = cmd.index("cp")
-        source = cmd[cp_index + 1]
-        dest = cmd[cp_index + 2]
+        # The positionals are interleaved with options (a boolean flag such as
+        # --only-show-errors, or a (flag, value) pair such as --content-type),
+        # so skip those to recover the two positional arguments.
+        value_flags = {"--content-type", "--metadata"}
+        positionals = []
+        i = cmd.index("cp") + 1
+        while i < len(cmd):
+            token = cmd[i]
+            if token in value_flags:
+                i += 2
+                continue
+            if token.startswith("--"):
+                i += 1
+                continue
+            positionals.append(token)
+            i += 1
+        source, dest = positionals[0], positionals[1]
         if dest.startswith("s3://"):
             return self._upload(cmd, source, dest)
         return self._download(cmd, source, dest)
@@ -238,11 +252,19 @@ class S3Test(unittest.TestCase):
         self.assertEqual(
             "binary/octet-stream",
             upload_cmd[upload_cmd.index("--content-type") + 1])
+        # Transfers suppress `s3 cp` progress noise so a failure's captured
+        # output carries just the error text.
+        self.assertIn("--only-show-errors", upload_cmd)
 
         os.remove(filepath)
         dut.download_file(hashsum, project_relpath, filepath)
         with open(filepath, "r") as f:
             self.assertEqual("payload\n", f.read())
+
+        download_cmd = next(
+            call["cmd"] for call in reversed(self._fake_aws.calls)
+            if "cp" in call["cmd"])
+        self.assertIn("--only-show-errors", download_cmd)
 
     def test_upload_can_be_disabled(self):
         dut = self._make_dut(disable_upload=True)

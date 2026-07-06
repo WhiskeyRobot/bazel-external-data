@@ -233,7 +233,10 @@ class S3Backend(Backend):
                 f"File not available '{project_relpath}' "
                 f"(hash: {hash.get_value()})")
         self._verbose_print(f"cp {self._s3_uri(key)} -> {output_file}")
-        result = self._run_aws(["s3", "cp", self._s3_uri(key), output_file])
+        result = self._run_aws([
+            "s3", "cp", "--only-show-errors",
+            self._s3_uri(key), output_file,
+        ])
         if result.returncode != 0:
             self._handle_aws_error(result, "GET", key)
         self._verbose_print("File downloaded successfully!")
@@ -245,13 +248,12 @@ class S3Backend(Backend):
         if self.check_file(hash, project_relpath):
             print("File already uploaded")
             return
-        # Pin a neutral Content-Type rather than let `s3 cp` infer one from the
-        # filename, so every object is labeled uniformly as opaque data
-        # without relying on s3 to guess the type from filename. The source
-        # filename is preserved in the `original-name` metadata.
+        # Pin a neutral Content-Type rather than let `s3 cp` infer one from
+        # the filename, so every object is labeled uniformly as opaque data.
+        # The source filename is preserved in the `original-name` metadata.
         self._verbose_print(f"cp {filepath} -> {self._s3_uri(key)}")
         result = self._run_aws([
-            "s3", "cp", filepath, self._s3_uri(key),
+            "s3", "cp", "--only-show-errors", filepath, self._s3_uri(key),
             "--content-type", "binary/octet-stream",
             "--metadata", json.dumps(
                 self._compute_metadata(project_relpath, filepath),
