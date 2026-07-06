@@ -36,18 +36,20 @@ class FakeAws(object):
         })
         self.assert_run_kwargs(stdout, stderr, text)
 
-        s3api_index = cmd.index("s3api")
-        operation = cmd[s3api_index + 1]
-        bucket = self._flag(cmd, "--bucket")
-        key = self._flag(cmd, "--key")
-
-        if operation == "head-object":
-            return self._head_object(cmd, bucket, key)
-        if operation == "put-object":
-            return self._put_object(cmd, bucket, key)
-        if operation == "get-object":
-            return self._get_object(cmd, bucket, key)
-        raise AssertionError(f"Unsupported operation: {operation}")
+        # The existence check uses `s3api head-object`; transfers use the
+        # high-level `s3 cp`.
+        if "s3api" in cmd:
+            operation = cmd[cmd.index("s3api") + 1]
+            if operation == "head-object":
+                return self._head_object(
+                    cmd, self._flag(cmd, "--bucket"), self._flag(cmd, "--key"))
+            raise AssertionError(f"Unsupported s3api operation: {operation}")
+        if "s3" in cmd:
+            operation = cmd[cmd.index("s3") + 1]
+            if operation == "cp":
+                return self._cp(cmd)
+            raise AssertionError(f"Unsupported s3 operation: {operation}")
+        raise AssertionError(f"Unsupported command: {cmd}")
 
     def assert_run_kwargs(self, stdout, stderr, text):
         if stdout != subprocess.PIPE:
@@ -59,6 +61,10 @@ class FakeAws(object):
 
     def _flag(self, cmd, name):
         return cmd[cmd.index(name) + 1]
+
+    def _parse_s3_uri(self, uri):
+        bucket, _, key = uri[len("s3://"):].partition("/")
+        return bucket, key
 
     def _head_object(self, cmd, bucket, key):
         if self.deny_head:
@@ -81,30 +87,39 @@ class FakeAws(object):
             )
         return _completed_process(cmd, stdout="{}\n")
 
-    def _put_object(self, cmd, bucket, key):
-        filepath = self._flag(cmd, "--body")
-        with open(filepath, "rb") as f:
+    def _cp(self, cmd):
+        # `s3 cp` takes positional <source> <dest>; exactly one is an s3:// URI.
+        cp_index = cmd.index("cp")
+        source = cmd[cp_index + 1]
+        dest = cmd[cp_index + 2]
+        if dest.startswith("s3://"):
+            return self._upload(cmd, source, dest)
+        return self._download(cmd, source, dest)
+
+    def _upload(self, cmd, source, dest):
+        bucket, key = self._parse_s3_uri(dest)
+        with open(source, "rb") as f:
             body = f.read()
         self.objects[(bucket, key)] = {
             "body": body,
             "metadata": json.loads(self._flag(cmd, "--metadata")),
         }
-        return _completed_process(cmd, stdout='{"ETag": "etag"}\n')
+        return _completed_process(cmd, stdout=f"upload: {source} to {dest}\n")
 
-    def _get_object(self, cmd, bucket, key):
+    def _download(self, cmd, source, dest):
         if self.fail_download:
             return _completed_process(
                 cmd,
                 returncode=255,
                 stdout=(
-                    "An error occurred (RequestTimeout) when calling the "
-                    "GetObject operation: network unavailable"
+                    "download failed: An error occurred (RequestTimeout) when "
+                    "calling the GetObject operation: network unavailable"
                 ),
             )
-        output_file = cmd[-1]
-        with open(output_file, "wb") as f:
+        bucket, key = self._parse_s3_uri(source)
+        with open(dest, "wb") as f:
             f.write(self.objects[(bucket, key)]["body"])
-        return _completed_process(cmd, stdout='{"ContentLength": 8}\n')
+        return _completed_process(cmd, stdout=f"download: {source} to {dest}\n")
 
 
 class S3Test(unittest.TestCase):
@@ -215,6 +230,14 @@ class S3Test(unittest.TestCase):
         self.assertEqual(project_relpath, metadata["original-path"])
         self.assertEqual("payload.txt", metadata["original-name"])
         self.assertIn("git-commit-best-effort", metadata)
+
+        # The upload pins a neutral content type regardless of the source
+        # file's extension.
+        upload_cmd = next(
+            call["cmd"] for call in self._fake_aws.calls if "cp" in call["cmd"])
+        self.assertEqual(
+            "binary/octet-stream",
+            upload_cmd[upload_cmd.index("--content-type") + 1])
 
         os.remove(filepath)
         dut.download_file(hashsum, project_relpath, filepath)
