@@ -46,11 +46,12 @@ class S3Backend(Backend):
       disable_upload: if true, `upload_file` raises (default false).
       verbose: if true, log AWS commands and progress (default false).
 
-    Operations use the `s3api` subcommands rather than the higher-level `s3`
-    commands because the existence/dedup check needs `head-object`'s
-    structured result to tell missing (404) apart from access-denied (403),
-    which `s3 ls` does not surface cleanly. The other operations use `s3api`
-    too, for consistency.
+    The existence/dedup check uses the `s3api head-object` subcommand because
+    it needs the structured result to tell missing (404) apart from
+    access-denied (403), which `s3 ls` does not surface cleanly. Uploads and
+    downloads use the higher-level `s3 cp` transfer manager, which fetches and
+    stores large objects as retried, parallel multipart parts and so survives
+    a dropped connection that would fail a single non-resumable `s3api` stream.
     """
 
     def __init__(self, config, project_root, user):
@@ -255,13 +256,10 @@ class S3Backend(Backend):
             raise util.DownloadError(
                 f"File not available '{project_relpath}' "
                 f"(hash: {hash.get_value()})")
-        self._verbose_print(f"get {self._s3_uri(key)}")
+        self._verbose_print(f"cp {self._s3_uri(key)} -> {output_file}")
         result = self._run_aws([
-            "s3api",
-            "get-object",
-            "--bucket", self._bucket,
-            "--key", key,
-            output_file,
+            "s3", "cp", "--only-show-errors",
+            self._s3_uri(key), output_file,
         ])
         if result.returncode != 0:
             self._handle_aws_error(result, "GET", key)
@@ -274,13 +272,13 @@ class S3Backend(Backend):
         if self.check_file(hash, project_relpath):
             print("File already uploaded")
             return
-        self._verbose_print(f"put {self._s3_uri(key)}")
+        # Pin a neutral Content-Type rather than let `s3 cp` infer one from
+        # the filename, so every object is labeled uniformly as opaque data.
+        # The source filename is preserved in the `original-name` metadata.
+        self._verbose_print(f"cp {filepath} -> {self._s3_uri(key)}")
         result = self._run_aws([
-            "s3api",
-            "put-object",
-            "--bucket", self._bucket,
-            "--key", key,
-            "--body", filepath,
+            "s3", "cp", "--only-show-errors", filepath, self._s3_uri(key),
+            "--content-type", "binary/octet-stream",
             "--metadata", json.dumps(
                 self._compute_metadata(project_relpath, filepath),
                 sort_keys=True,
