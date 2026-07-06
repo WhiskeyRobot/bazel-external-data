@@ -269,6 +269,28 @@ class S3Test(unittest.TestCase):
                     hashsum,
                     "external_data/archives/payload.tar.gz")
 
+    def test_expired_sso_error_suggests_login(self):
+        def expired_sso(cmd, stdout, stderr, text, env):
+            return _completed_process(
+                cmd,
+                returncode=255,
+                stdout=(
+                    "Error when retrieving token from sso: Token has expired "
+                    "and refresh failed"
+                ),
+            )
+
+        with mock.patch("subprocess.run", side_effect=expired_sso):
+            dut = self._make_dut(profile="unit-test-profile")
+            filepath = self._make_file()
+            hashsum = hashes.sha512.compute(filepath)
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"aws sso login --profile=unit-test-profile"):
+                dut.check_file(
+                    hashsum,
+                    "external_data/archives/payload.tar.gz")
+
     def test_generic_aws_errors_are_not_credential_errors(self):
         dut = self._make_dut()
         filepath = self._make_file()
